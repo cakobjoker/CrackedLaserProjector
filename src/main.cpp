@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <AccelStepper.h>
 
 // Laser control settings
 #define LASER_PIN 21
@@ -8,7 +9,7 @@
 
 // Safety timeout settings
 #define TIMEOUT_MS 30000     // 30 seconds timeout for power >50%
-#define HIGH_POWER_THRESHOLD 50  // Power level that triggers timeout
+#define HIGH_POWER_THRESHOLD 40  // Power level that triggers timeout
 
 uint8_t laserPower = 0;  // Current laser power (0-100)
 unsigned long lastActivityTime = 0;
@@ -56,25 +57,69 @@ void checkSafetyTimeout() {
   if (currentTime - lastActivityTime >= TIMEOUT_MS) {
     Serial.println("===================================");
     Serial.println("SAFETY TIMEOUT: Auto-disabling laser!");
-    Serial.println("Laser was at high power (>50%) for too long");
+    Serial.println("Laser was at high power (>40%) for too long");
     Serial.println("===================================");
     setLaserPower(0);
   }
+}
+
+// Stepper motor settings
+#define STEPS_PER_REV 2048  // 28BYJ-48 with gear reduction (64 * 32)
+
+// Motor 1 pins (D15, D2, D4, D16)
+#define MOTOR1_PIN1 15
+#define MOTOR1_PIN2 2
+#define MOTOR1_PIN3 4
+#define MOTOR1_PIN4 16
+
+// Motor 2 pins (D17, D5, D18, D19)
+#define MOTOR2_PIN1 17
+#define MOTOR2_PIN2 5
+#define MOTOR2_PIN3 18
+#define MOTOR2_PIN4 19
+
+// Create stepper objects (using HALF4WIRE for 28BYJ-48)
+AccelStepper motor1(AccelStepper::HALF4WIRE, MOTOR1_PIN1, MOTOR1_PIN3, MOTOR1_PIN2, MOTOR1_PIN4);
+AccelStepper motor2(AccelStepper::HALF4WIRE, MOTOR2_PIN1, MOTOR2_PIN3, MOTOR2_PIN2, MOTOR2_PIN4);
+
+void moveMotorByDegrees(int motorNum, int degrees) {
+  AccelStepper* motor = (motorNum == 1) ? &motor1 : &motor2;
+  
+  // Convert degrees to steps
+  long steps = (long)((degrees / 360.0) * STEPS_PER_REV);
+  
+  Serial.print("Motor ");
+  Serial.print(motorNum);
+  Serial.print(": Moving ");
+  Serial.print(degrees);
+  Serial.print(" degrees (");
+  Serial.print(steps);
+  Serial.println(" steps)");
+  
+  motor->move(steps);
 }
 
 void setup() {
   // SAFETY: Configure PWM BEFORE attaching pin to ensure it starts at 0
   ledcSetup(PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
   ledcWrite(PWM_CHANNEL, 0);  // Explicitly set to 0 before pin attachment
-  ledcAttachPin(LASER_PIN, PWM_CHANNEL);
+  ledcAttachPin(LASER_PIN, PWM_CHANNEL);  // Note: Laser now on different pin
+  
+  // Configure stepper motors
+  motor1.setMaxSpeed(1000);
+  motor1.setAcceleration(500);
+  motor2.setMaxSpeed(1000);
+  motor2.setAcceleration(500);
   
   // Initialize serial
   Serial.begin(115200);
   Serial.println("===================================");
   Serial.println("CLASS 4 LASER PWM Controller");
+  Serial.println("with Dual Stepper Motor Control");
   Serial.println("===================================");
   Serial.println("SAFETY: Laser starts at 0% power");
-  Serial.println("Send power value 0-100 via serial");
+  Serial.println("Laser: Send power value 0-100");
+  Serial.println("Motors: Send 'motor,degrees' (e.g., '1,90' or '2,-45')");
   Serial.println("Invalid values default to 0% (OFF)");
   Serial.print("SAFETY: Auto-timeout at >50% power: ");
   Serial.print(TIMEOUT_MS / 1000);
@@ -90,24 +135,40 @@ void loop() {
   // SAFETY: Check for timeout condition
   checkSafetyTimeout();
   
+  // Run motors (non-blocking)
+  motor1.run();
+  motor2.run();
+  
   // Check for serial input
   if (Serial.available()) {
-    // Read the incoming value
-    int value = Serial.parseInt();
+    String input = Serial.readStringUntil('\n');
+    input.trim();
     
-    // Consume any remaining characters (like newline)
-    while (Serial.available()) {
-      Serial.read();
-    }
-    
-    // SAFETY: Only accept valid range, otherwise set to 0
-    if (value >= 0 && value <= 100) {
-      setLaserPower(value);
+    // Check if input contains comma (motor command)
+    int commaIndex = input.indexOf(',');
+    if (commaIndex > 0) {
+      // Motor command: motor_number,degrees
+      int motorNum = input.substring(0, commaIndex).toInt();
+      int degrees = input.substring(commaIndex + 1).toInt();
+      
+      if (motorNum == 1 || motorNum == 2) {
+        moveMotorByDegrees(motorNum, degrees);
+      } else {
+        Serial.println("ERROR: Invalid motor number. Use 1 or 2.");
+      }
     } else {
-      Serial.print("ERROR: Invalid value (");
-      Serial.print(value);
-      Serial.println("). Setting laser to 0% for safety.");
-      setLaserPower(0);
+      // Laser power command
+      int value = input.toInt();
+      
+      // SAFETY: Only accept valid range, otherwise set to 0
+      if (value >= 0 && value <= 100) {
+        setLaserPower(value);
+      } else {
+        Serial.print("ERROR: Invalid value (");
+        Serial.print(value);
+        Serial.println("). Setting laser to 0% for safety.");
+        setLaserPower(0);
+      }
     }
   }
 }
